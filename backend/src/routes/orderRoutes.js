@@ -4,12 +4,28 @@ const router = express.Router();
 const pool = require("../db");
 const { authMiddleware, adminOnly } = require("../middlewares/authMiddleware");
 
-// ---------------------------------------------------
-// POST /api/orders  → créer une commande (client)
-// body: { items: [...], shipping: {...} }
-// ---------------------------------------------------
+const REQUIRED_SHIPPING = [
+  ["firstName", "Prénom"],
+  ["lastName", "Nom"],
+  ["email", "Email"],
+  ["phone", "Téléphone"],
+  ["address", "Adresse"],
+  ["city", "Ville"],
+  ["postalCode", "Code postal"],
+  ["governorate", "Gouvernorat"],
+];
+
+const ALLOWED_STATUS = [
+  "pending",
+  "processing",
+  "shipped",
+  "delivered",
+  "cancelled",
+];
+
 router.post("/", authMiddleware, async (req, res) => {
   const client = await pool.connect();
+  let started = false;
 
   try {
     const { items, shipping } = req.body;
@@ -18,19 +34,21 @@ router.post("/", authMiddleware, async (req, res) => {
       return res.status(400).json({ message: "Aucun article dans la commande" });
     }
 
-    // ✅ shipping (infos client) - sécurisé
     const s = shipping || {};
-    const customerName =
-      (s.firstName || s.lastName)
-        ? `${s.firstName || ""} ${s.lastName || ""}`.trim()
-        : (s.name || null);
+    for (const [key, label] of REQUIRED_SHIPPING) {
+      if (!String(s[key] || "").trim()) {
+        return res.status(400).json({ message: `Champ obligatoire : ${label}` });
+      }
+    }
+
+    const customerName = `${String(s.firstName).trim()} ${String(s.lastName).trim()}`.trim();
 
     await client.query("BEGIN");
+    started = true;
 
-    // 🔎 récupérer produits
-    const ids = items.map((it) => it.product_id);
+    const ids = [...new Set(items.map((it) => Number(it.product_id)))];
     const resultProducts = await client.query(
-      "SELECT id, price, stock FROM products WHERE id = ANY($1)",
+      "SELECT id, price, stock, is_active FROM products WHERE id = ANY($1)",
       [ids]
     );
     const products = resultProducts.rows;
@@ -38,27 +56,45 @@ router.post("/", authMiddleware, async (req, res) => {
     let total = 0;
 
     for (const item of items) {
-      const p = products.find((pr) => pr.id === item.product_id);
-      if (!p) throw new Error(`Produit introuvable (id=${item.product_id})`);
-
-      const qty = Number(item.quantity);
-      if (!Number.isFinite(qty) || qty <= 0) {
-        throw new Error(`Quantité invalide pour le produit ${item.product_id}`);
+      const productId = Number(item.product_id);
+      const p = products.find((pr) => pr.id === productId);
+      if (!p) {
+        const error = new Error("NOT_FOUND");
+        error.status = 404;
+        error.publicMessage = `Produit introuvable (id=${item.product_id})`;
+        throw error;
       }
 
-      if (qty > Number(p.stock)) {
-        throw new Error(`Stock insuffisant pour le produit ${p.id}`);
+      if (p.is_active === false) {
+        const error = new Error("INACTIVE");
+        error.status = 409;
+        error.publicMessage = `Le produit ${p.id} n'est plus disponible`;
+        throw error;
+      }
+
+      const qty = Number(item.quantity);
+      if (!Number.isInteger(qty) || qty <= 0) {
+        const error = new Error("QTY");
+        error.status = 400;
+        error.publicMessage = `Quantité invalide pour le produit ${item.product_id}`;
+        throw error;
+      }
+
+      const stockUpdate = await client.query(
+        "UPDATE products SET stock = stock - $1 WHERE id = $2 AND stock >= $1 RETURNING id",
+        [qty, productId]
+      );
+
+      if (stockUpdate.rowCount === 0) {
+        const error = new Error("STOCK");
+        error.status = 409;
+        error.publicMessage = `Stock insuffisant pour le produit ${p.id}`;
+        throw error;
       }
 
       total += Number(p.price) * qty;
-
-      await client.query(
-        "UPDATE products SET stock = stock - $1 WHERE id = $2",
-        [qty, item.product_id]
-      );
     }
 
-    // ✅ enregistrer commande
     const orderRes = await client.query(
       `INSERT INTO orders
         (user_id, total, status,
@@ -75,16 +111,15 @@ router.post("/", authMiddleware, async (req, res) => {
         req.user.id,
         total.toFixed(2),
         "pending",
-
         customerName,
-        s.email || null,
-        s.phone || null,
-        s.address || null,
-        s.city || null,
-        s.postalCode || null,
-        s.governorate || null,
+        String(s.email).trim(),
+        String(s.phone).trim(),
+        String(s.address).trim(),
+        String(s.city).trim(),
+        String(s.postalCode).trim(),
+        String(s.governorate).trim(),
         s.cin || null,
-        s.birthDate ? s.birthDate : null, // ✅ null si vide
+        s.birthDate ? s.birthDate : null,
         s.phone2 || null,
         s.instructions || null,
       ]
@@ -92,32 +127,40 @@ router.post("/", authMiddleware, async (req, res) => {
 
     const order = orderRes.rows[0];
 
-    // ✅ items
     for (const item of items) {
-      const p = products.find((pr) => pr.id === item.product_id);
+      const productId = Number(item.product_id);
+      const p = products.find((pr) => pr.id === productId);
       const qty = Number(item.quantity);
 
       await client.query(
         `INSERT INTO order_items (order_id, product_id, quantity, unit_price)
          VALUES ($1,$2,$3,$4)`,
-        [order.id, item.product_id, qty, Number(p.price)]
+        [order.id, productId, qty, Number(p.price)]
       );
     }
 
     await client.query("COMMIT");
+    started = false;
     res.status(201).json({ message: "Commande créée", order });
   } catch (err) {
-    await client.query("ROLLBACK");
-    console.error("create order error:", err);
-    res.status(400).json({ message: err.message || "Erreur commande" });
+    if (started) {
+      try {
+        await client.query("ROLLBACK");
+      } catch (rollbackErr) {
+        console.error("rollback error:", rollbackErr.message);
+      }
+    }
+    console.error("create order error:", err.message);
+    const status = err.status || 500;
+    const message =
+      err.publicMessage ||
+      (status === 500 ? "Erreur commande" : err.message);
+    res.status(status).json({ message });
   } finally {
     client.release();
   }
 });
 
-// ---------------------------------------------------
-// GET /api/orders/me  → commandes du client connecté
-// ---------------------------------------------------
 router.get("/me", authMiddleware, async (req, res) => {
   try {
     const result = await pool.query(
@@ -148,14 +191,11 @@ router.get("/me", authMiddleware, async (req, res) => {
 
     res.json(result.rows);
   } catch (err) {
-    console.error("orders/me error:", err);
+    console.error("orders/me error:", err.message);
     res.status(500).json({ message: "Erreur récupération commandes client" });
   }
 });
 
-// ---------------------------------------------------
-// GET /api/orders  → liste complète (admin)
-// ---------------------------------------------------
 router.get("/", authMiddleware, adminOnly, async (_req, res) => {
   try {
     const result = await pool.query(
@@ -187,20 +227,16 @@ router.get("/", authMiddleware, adminOnly, async (_req, res) => {
 
     res.json(result.rows);
   } catch (err) {
-    console.error("admin orders error:", err);
+    console.error("admin orders error:", err.message);
     res.status(500).json({ message: "Erreur récupération commandes admin" });
   }
 });
 
-// ---------------------------------------------------
-// PATCH /api/orders/:id/status  → changer le statut (admin)
-// ---------------------------------------------------
 router.patch("/:id/status", authMiddleware, adminOnly, async (req, res) => {
   const { id } = req.params;
   const { status } = req.body;
 
-  const allowed = ["pending", "processing", "shipped", "delivered", "cancelled"];
-  if (!allowed.includes(status)) {
+  if (!ALLOWED_STATUS.includes(status)) {
     return res.status(400).json({ message: "Statut invalide" });
   }
 
@@ -216,7 +252,7 @@ router.patch("/:id/status", authMiddleware, adminOnly, async (req, res) => {
 
     res.json({ message: "Statut mis à jour", order: result.rows[0] });
   } catch (err) {
-    console.error("update status error:", err);
+    console.error("update status error:", err.message);
     res.status(500).json({ message: "Erreur mise à jour statut" });
   }
 });

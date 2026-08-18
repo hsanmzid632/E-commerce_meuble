@@ -1,11 +1,24 @@
 // backend/src/server.js
-require("dotenv").config();
-const app = require("./app");
+const path = require("path");
+require("dotenv").config({ path: path.join(__dirname, "../.env") });
 
-app.use("/orders", require("./routes/orderRoutes"));
+const app = require("./app");
+const pool = require("./db");
 
 const PORT = process.env.PORT || 5000;
 
-app.listen(PORT, () => {
-  console.log(`✅ Serveur backend démarré sur le port ${PORT}`);
-});
+if (!process.env.JWT_SECRET) {
+  console.error("❌ JWT_SECRET manquant dans les variables d'environnement");
+  process.exit(1);
+}
+
+pool.ready
+  .then(() => {
+    app.listen(PORT, () => {
+      console.log(`✅ Serveur backend démarré sur le port ${PORT}`);
+    });
+  })
+  .catch(() => {
+    console.error("❌ Impossible de démarrer : base de données indisponible");
+    process.exit(1);
+  });

@@ -18,10 +18,11 @@ function resolveImageUrl(imageUrl) {
   if (!imageUrl) return "";
   if (/^https?:\/\//i.test(imageUrl)) return imageUrl;
 
-  const base =
+  const apiBase =
     api?.defaults?.baseURL ||
     import.meta.env.VITE_API_URL ||
-    "http://localhost:5000";
+    "http://localhost:5000/api";
+  const base = String(apiBase).replace(/\/api\/?$/, "") || "http://localhost:5000";
 
   const cleanBase = base.replace(/\/$/, "");
   const cleanPath = String(imageUrl).replace(/^\//, "");

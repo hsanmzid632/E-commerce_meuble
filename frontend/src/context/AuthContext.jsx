@@ -32,7 +32,7 @@ export function AuthProvider({ children }) {
   const value = {
     user,
     token,
-    isAuthenticated: !!user,
+    isAuthenticated: !!(user && token),
     isAdmin: user?.role === "admin",
     login,
     logout,

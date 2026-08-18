@@ -1,4 +1,6 @@
 // backend/src/controllers/orderController.js
+// Unused legacy controller. Canonical order flow lives in routes/orderRoutes.js
+// (transactional POST /api/orders). Kept for reference; not mounted.
 const pool = require("../db");
 
 // =========================

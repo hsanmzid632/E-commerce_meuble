@@ -1,6 +1,7 @@
 // backend/src/db.js
+const path = require("path");
 const { Pool } = require("pg");
-require("dotenv").config();
+require("dotenv").config({ path: path.join(__dirname, "../.env") });
 
 const pool = new Pool({
   user: process.env.DB_USER,
@@ -10,17 +11,19 @@ const pool = new Pool({
   port: process.env.DB_PORT,
 });
 
-// Connexion
-pool.connect()
-  .then(() => console.log("✅ Connecté à PostgreSQL"))
-  .catch((err) => console.error("❌ Erreur connexion PostgreSQL :", err));
+async function addColumnIfMissing(table, column, definition) {
+  await pool.query(`
+    DO $$ BEGIN
+      BEGIN
+        ALTER TABLE ${table} ADD COLUMN ${column} ${definition};
+      EXCEPTION WHEN duplicate_column THEN NULL;
+      END;
+    END $$;
+  `);
+}
 
-/* -----------------------------------------
-   Création automatique des tables si absentes
------------------------------------------- */
 async function initializeTables() {
   try {
-    // Table users
     await pool.query(`
       CREATE TABLE IF NOT EXISTS users (
         id SERIAL PRIMARY KEY,
@@ -31,7 +34,6 @@ async function initializeTables() {
       );
     `);
 
-    // Table categories
     await pool.query(`
       CREATE TABLE IF NOT EXISTS categories (
         id SERIAL PRIMARY KEY,
@@ -39,7 +41,6 @@ async function initializeTables() {
       );
     `);
 
-    // Table products
     await pool.query(`
       CREATE TABLE IF NOT EXISTS products (
         id SERIAL PRIMARY KEY,
@@ -48,12 +49,42 @@ async function initializeTables() {
         price NUMERIC(10,2) NOT NULL,
         stock INTEGER NOT NULL DEFAULT 0,
         image VARCHAR(500),
+        image_url VARCHAR(500),
         category_id INTEGER REFERENCES categories(id),
-        active BOOLEAN DEFAULT true
+        active BOOLEAN DEFAULT true,
+        is_active BOOLEAN DEFAULT true,
+        created_at TIMESTAMP DEFAULT NOW()
       );
     `);
 
-        // Table orders
+    await addColumnIfMissing("products", "image_url", "VARCHAR(500)");
+    await addColumnIfMissing("products", "is_active", "BOOLEAN DEFAULT true");
+    await addColumnIfMissing("products", "created_at", "TIMESTAMP DEFAULT NOW()");
+
+    await pool.query(`
+      UPDATE products
+      SET image_url = image
+      WHERE image_url IS NULL AND image IS NOT NULL
+    `);
+    await pool.query(`
+      UPDATE products
+      SET image = image_url
+      WHERE image IS NULL AND image_url IS NOT NULL
+    `);
+    await pool.query(`
+      UPDATE products
+      SET is_active = COALESCE(is_active, active, TRUE)
+    `);
+    await pool.query(`
+      UPDATE products
+      SET active = COALESCE(active, is_active, TRUE)
+    `);
+    await pool.query(`
+      UPDATE products
+      SET created_at = NOW()
+      WHERE created_at IS NULL
+    `);
+
     await pool.query(`
       CREATE TABLE IF NOT EXISTS orders (
         id SERIAL PRIMARY KEY,
@@ -64,31 +95,30 @@ async function initializeTables() {
         customer_email VARCHAR(150),
         customer_phone VARCHAR(50),
         customer_address TEXT,
+        customer_city VARCHAR(100),
+        customer_postal_code VARCHAR(20),
+        customer_governorate VARCHAR(100),
+        customer_cin VARCHAR(50),
+        customer_birthdate DATE,
+        customer_phone2 VARCHAR(50),
+        customer_instructions TEXT,
         created_at TIMESTAMP DEFAULT NOW()
       );
     `);
 
+    await addColumnIfMissing("orders", "customer_name", "VARCHAR(150)");
+    await addColumnIfMissing("orders", "customer_email", "VARCHAR(150)");
+    await addColumnIfMissing("orders", "customer_phone", "VARCHAR(50)");
+    await addColumnIfMissing("orders", "customer_address", "TEXT");
+    await addColumnIfMissing("orders", "customer_city", "VARCHAR(100)");
+    await addColumnIfMissing("orders", "customer_postal_code", "VARCHAR(20)");
+    await addColumnIfMissing("orders", "customer_governorate", "VARCHAR(100)");
+    await addColumnIfMissing("orders", "customer_cin", "VARCHAR(50)");
+    await addColumnIfMissing("orders", "customer_birthdate", "DATE");
+    await addColumnIfMissing("orders", "customer_phone2", "VARCHAR(50)");
+    await addColumnIfMissing("orders", "customer_instructions", "TEXT");
+    await addColumnIfMissing("orders", "created_at", "TIMESTAMP DEFAULT NOW()");
 
-        await pool.query(`
-      DO $$ BEGIN
-        BEGIN
-          ALTER TABLE orders ADD COLUMN customer_name VARCHAR(150);
-        EXCEPTION WHEN duplicate_column THEN NULL; END;
-        BEGIN
-          ALTER TABLE orders ADD COLUMN customer_email VARCHAR(150);
-        EXCEPTION WHEN duplicate_column THEN NULL; END;
-        BEGIN
-          ALTER TABLE orders ADD COLUMN customer_phone VARCHAR(50);
-        EXCEPTION WHEN duplicate_column THEN NULL; END;
-        BEGIN
-          ALTER TABLE orders ADD COLUMN customer_address TEXT;
-        EXCEPTION WHEN duplicate_column THEN NULL; END;
-      END $$;
-    `);
-
-
-
-    // Table order_items
     await pool.query(`
       CREATE TABLE IF NOT EXISTS order_items (
         id SERIAL PRIMARY KEY,
@@ -101,11 +131,20 @@ async function initializeTables() {
 
     console.log("📦 Tables PostgreSQL vérifiées/créées avec succès.");
   } catch (err) {
-    console.error("❌ Erreur lors de la création des tables :", err);
+    console.error("❌ Erreur lors de la création des tables :", err.message);
+    throw err;
   }
 }
 
-// Exécuter la création des tables
-initializeTables();
+pool.ready = pool
+  .query("SELECT 1")
+  .then(() => {
+    console.log("✅ Connecté à PostgreSQL");
+    return initializeTables();
+  })
+  .catch((err) => {
+    console.error("❌ Erreur connexion PostgreSQL :", err.message);
+    throw err;
+  });
 
 module.exports = pool;

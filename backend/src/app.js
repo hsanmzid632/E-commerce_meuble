@@ -7,7 +7,6 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Routes
 const userRoutes = require("./routes/userRoutes");
 const categoryRoutes = require("./routes/categoryRoutes");
 const productRoutes = require("./routes/productRoutes");
@@ -20,6 +19,15 @@ app.get("/", (_req, res) => {
 app.use("/api/users", userRoutes);
 app.use("/api/categories", categoryRoutes);
 app.use("/api/products", productRoutes);
-app.use("/api/orders", orderRoutes); // ✅ seulement ça
+app.use("/api/orders", orderRoutes);
+
+app.use("/api", (_req, res) => {
+  res.status(404).json({ message: "Route introuvable" });
+});
+
+app.use((err, _req, res, _next) => {
+  console.error("Unhandled error:", err.message);
+  res.status(500).json({ message: "Erreur serveur" });
+});
 
 module.exports = app;
